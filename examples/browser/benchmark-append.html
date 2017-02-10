@@ -8,7 +8,7 @@
     <h2>Description</h2>
     <div>Add an entry to a log. Measure throughput in operations per second.</div>
     <pre><i>
-    let log = Log.create(ipfs)
+    let log = Log.create()
     log = Log.append(ipfs, log, loopCount)
     </i></pre>
 
@@ -65,7 +65,7 @@
             queriesPerSecond = 0
           }, 1000)
 
-          log = Log.create(ipfs)
+          log = Log.create()
           queryLoop()
         })
 

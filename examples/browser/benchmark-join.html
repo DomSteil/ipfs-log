@@ -8,8 +8,8 @@
     <h2>Description</h2>
     <div>Add an entry to two logs and join them after each update. Limit the number of entries to 60. Measure throughput in operations per second.</div>
     <pre><i>
-    let log1 = Log.create(ipfs)
-    let log2 = Log.create(ipfs)
+    let log1 = Log.create()
+    let log2 = Log.create()
 
     const add1 = Log.append(ipfs, log1, "a" + loopCount)
     const add2 = Log.append(ipfs, log2, "b" + loopCount)
@@ -79,8 +79,8 @@
             queriesPerSecond = 0
           }, 1000)
 
-          log1 = Log.create(ipfs)
-          log2 = Log.create(ipfs)
+          log1 = Log.create()
+          log2 = Log.create()
           queryLoop()
         })
 

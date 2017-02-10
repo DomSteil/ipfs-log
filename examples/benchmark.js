@@ -48,7 +48,7 @@ let run = (() => {
       queriesPerSecond = 0
     }, 1000)
 
-    log = Log.create(ipfs)
+    log = Log.create()
     setImmediate(queryLoop)
   })
 })()

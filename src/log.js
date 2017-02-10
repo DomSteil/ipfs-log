@@ -1,12 +1,12 @@
 'use strict'
 
 const Entry = require('./entry')
-const mapSeries = require('./map-series')
+const whilst = require('async/whilst')
 
 const IpfsNotDefinedError = new Error('Ipfs instance not defined')
 const LogNotDefinedError = new Error('Log instance not defined')
 
-/**
+/** 
  * ipfs-log
  *
  * @example
@@ -27,7 +27,9 @@ const LogNotDefinedError = new Error('Log instance not defined')
  * })
  */
 class Log {
-  constructor (ipfs, entries, heads) {
+  constructor(entries, heads) {
+    if (entries && !Array.isArray(entries)) throw new Error('entries argument must be an array')
+    if (heads && !Array.isArray(heads)) throw new Error('heads argument must be an array')
     this._entries = entries || []
     this._heads = heads || []
   }
@@ -36,7 +38,7 @@ class Log {
    * Returns the items in the log
    * @returns {Array<Entry>}
    */
-  get items () {
+  get items() {
     return this._entries
   }
 
@@ -44,7 +46,7 @@ class Log {
    * Returns a list of heads as multihashes
    * @returns {Array<string>}
    */
-  get heads () {
+  get heads() {
     return this._heads
   }
 
@@ -53,7 +55,7 @@ class Log {
    * @param {string} [hash] The Multihash of the entry as Base58 encoded string
    * @returns {Entry|undefined}
    */
-  get (hash) {
+  get(hash) {
     return this.items.find((e) => e.hash === hash)
   }
 
@@ -65,7 +67,7 @@ class Log {
    *   └─three
    * @returns {string}
    */
-  toString () {
+  toString() {
     return this.items
       .slice()
       .reverse()
@@ -84,7 +86,7 @@ class Log {
    * Get the log in JSON format
    * @returns {Object<{heads}>}
    */
-  toJSON () {
+  toJSON() {
     return { heads: this.heads.slice() }
   }
 
@@ -92,7 +94,7 @@ class Log {
    * Get the log as a Buffer
    * @returns {Buffer}
    */
-  toBuffer () {
+  toBuffer() {
     return new Buffer(JSON.stringify(this.toJSON()))
   }
 }
@@ -105,33 +107,76 @@ class LogUtils {
    * @param {Array} [heads] - Heads for this log
    * @returns {Log}
    */
-  static create (ipfs, entries, heads) {
-    if (!ipfs) throw IpfsNotDefinedError
-
+  static create(entries, heads) {
     // If entries were given but not the heads, find them
     if (Array.isArray(entries) && !heads) {
       heads = LogUtils._findHeads(entries)
     }
 
-    return new Log(ipfs, entries, heads)
+    return new Log(entries, heads)
   }
+
+  static sort(entries, log1, log2) {
+      const stack = entries
+      const cache = {}
+      const res = []
+
+      while(stack.length > 0) {
+        const e = stack.shift()
+
+        if (!cache[e.hash]) {
+          cache[e.hash] = e
+
+          const indices2 = res.map((f, idx) => {
+            return f.next.includes(e.hash) ? idx : -1
+          })
+          const indices = e.next.map((next) => res.map(e => e.hash).indexOf(next))
+
+          let maxIndex1 = indices.reduce((acc, val) => {
+            return acc > val ? acc : val
+          }, -1)
+          let maxIndex2 = indices2.reduce((acc, val) => {
+            return acc > val ? acc : val
+          }, -1)
+
+          maxIndex1 = maxIndex1 > -1 ? maxIndex1 + 1 : 0
+          maxIndex2 = maxIndex2 > -1 ? maxIndex2 : 0
+
+          let maxIndex = Math.min(maxIndex1, maxIndex2)
+          res.splice(maxIndex, 0, e)
+
+          e.next.forEach((f, i) => {
+            let a = entries.find((e) => e.hash === f)
+            if (log1) a = a ? a : log1.get(f)
+            if (log2) a = a ? a : log2.get(f)
+            if (a)
+              stack.unshift(a)
+          })
+        }
+      }
+      return res
+    }
+
 
   /**
    * Create a new log starting from an entry
    * @param {IPFS} ipfs An IPFS instance
    * @param {string} hash Multihash as Base58 encoded string of the entry to start from
    * @param {Number} [length=-1] How many entries to include. Default: infinite.
-   * @param {function(hash, entry, parent, depth)} onProgressCallback
+   * @param {function(hash, entry, parent, depth)} onProgressCallback 
    * @returns {Promise<Log>}
    */
-  static fromEntry (ipfs, hash, length = -1, onProgressCallback) {
+  static fromEntry(ipfs, hash, length = -1, onProgressCallback) {
     if (!ipfs) throw IpfsNotDefinedError
 
-    return LogUtils._fetchRecursive(ipfs, hash, {}, length, 0, null, onProgressCallback)
+    return LogUtils.fetchAll(ipfs, hash, length)
+    // return LogUtils._fetchRecursive(ipfs, hash, length, 0, null, onProgressCallback)
       .then((items) => {
-        let log = LogUtils.create(ipfs)
-        items.reverse().forEach((e) => LogUtils._insert(ipfs, log, e))
-        log._heads = LogUtils._findHeads(log.items)
+        // let log = LogUtils.create()
+        let sorted = LogUtils.sort(items)
+        let log = LogUtils.create(sorted)
+        // items.reverse().forEach((e) => LogUtils._insert(ipfs, log, e))
+        // log._heads = LogUtils._findHeads(log.items)
         return log
       })
   }
@@ -141,10 +186,10 @@ class LogUtils {
    * @param {IPFS} ipfs - An IPFS instance
    * @param {string} hash - Multihash (as a Base58 encoded string) to create the log from
    * @param {Number} [length=-1] - How many items to include in the log
-   * @param {function(hash, entry, parent, depth)} onProgressCallback
+   * @param {function(hash, entry, parent, depth)} onProgressCallback 
    * @returns {Promise<Log>}
    */
-  static fromMultihash (ipfs, hash, length = -1, onProgressCallback) {
+  static fromMultihash(ipfs, hash, length = -1, onProgressCallback) {
     if (!ipfs) throw IpfsNotDefinedError
     if (!hash) throw new Error('Invalid hash: ' + hash)
 
@@ -153,12 +198,23 @@ class LogUtils {
       .then((logData) => {
         if (!logData.heads) throw new Error('Not a Log instance')
         // Fetch logs starting from each head entry
-        const allLogs = logData.heads
-          .sort(LogUtils._compare)
-          .map((f) => LogUtils.fromEntry(ipfs, f, length, onProgressCallback))
-        // Join all logs together to one log
-        return Promise.all(allLogs)
-          .then((logs) => LogUtils.joinAll(ipfs, logs))
+        // const allLogs = logData.heads
+        //   .sort(LogUtils._compare)
+        //   .map((f) => LogUtils.fromEntry(ipfs, f, length, excludeHashes, onProgressCallback))
+        // // Join all logs together to one log
+        // const joinAll = (logs) => LogUtils.joinAll(ipfs, logs)
+        // return Promise.all(allLogs).then(joinAll)
+        // console.log(">!<", logData.heads)
+        return LogUtils.fetchAll(ipfs, logData.heads, length)
+          .then((entries) => {
+            let log = LogUtils.create([])
+            // entries.reverse().forEach((e) => LogUtils._insert(ipfs, log, e))
+            entries.forEach((e) => LogUtils._insert(ipfs, log, e))
+            log._heads = logData.heads
+            // console.log("HEADS", log._heads, logData.heads)
+            return log
+            // LogUtils.create(ipfs, entries, logData.heads)
+          })
       })
   }
 
@@ -168,7 +224,7 @@ class LogUtils {
    * @param {Log} log Log to persist
    * @returns {Promise<string>}
    */
-  static toMultihash (ipfs, log) {
+  static toMultihash(ipfs, log) {
     if (!ipfs) throw IpfsNotDefinedError
     if (!log) throw LogNotDefinedError
 
@@ -191,7 +247,7 @@ class LogUtils {
    *
    * @returns {Promise<Log>}
    */
-  static append (ipfs, log, data) {
+  static append(ipfs, log, data) {
     if (!ipfs) throw IpfsNotDefinedError
     if (!log) throw LogNotDefinedError
 
@@ -203,13 +259,13 @@ class LogUtils {
         // Set the heads of this log to the latest entry
         const heads = [entry.hash]
         // Create a new log instance
-        return new Log(ipfs, items, heads)
+        return new Log(items, heads)
       })
   }
 
   /**
    * Join two logs
-   *
+   * 
    * @description Joins two logs returning a new log. Doesn't mutate the original logs.
    *
    * @param {IPFS} [ipfs] An IPFS instance
@@ -218,16 +274,16 @@ class LogUtils {
    *
    * @example
    * const log = Log.join(ipfs, log1, log2)
-   *
+   * 
    * @returns {Log}
    */
-  static join (ipfs, a, b, size) {
+  static join(ipfs, a, b, size) {
     if (!ipfs) throw IpfsNotDefinedError
     if (!a || !b) throw LogNotDefinedError
     if (!a.items || !b.items) throw new Error('Log to join must be an instance of Log')
 
     // If size is not specified, join all entries by default
-    size = size !== undefined ? size : a.items.length + b.items.length
+    size = size ? size : a.items.length + b.items.length
 
     // Get the heads from both logs and sort them by their IDs
     const getHeadEntries = (log) => {
@@ -250,15 +306,37 @@ class LogUtils {
     const log2 = isFirst ? b : a
 
     // Cap the size of the entries
-    const newEntries = log2.items.slice(0, size)
-    const oldEntries = log1.items.slice(0, size)
+    const oldEntries = log1.items.slice(-size)
+    const newEntries = log2.items.slice(-size)
+
+    // console.log("===========++")
+    // const sorted = sort(headsA.concat(headsB), log1, log2)
+    const hh = headsA.concat(headsB)
+      .sort((a, b) => a.hash < b.hash)
+      // .filter((e) => e !== undefined)
+
+    const sorted = LogUtils.sort(hh, log1, log2)
+    // const sorted = sort(oldEntries.concat(newEntries))
+    // console.log("===========++")
+    // console.log(sorted.map(e => e.payload))
+    // console.log("===========--")
 
     // Create a new log instance
-    let result = LogUtils.create(ipfs, oldEntries, heads)
-
+    // let result = LogUtils.create()
+    let result = LogUtils.create(sorted)
+    // let result = LogUtils.create(sorted, heads)
+    // console.log(oldEntries.map(e => e.payload))
     // Insert each entry to the log
-    newEntries.forEach((e) => LogUtils._insert(ipfs, result, e))
+    // console.log("1---------")
+    // oldEntries.reverse().forEach((e) => LogUtils._insert(ipfs, result, e, true))
+    // console.log("2---------")
+    // newEntries.reverse().forEach((e) => LogUtils._insert(ipfs, result, e, true))
+    // console.log("3---------")
 
+    result._entries = result._entries.slice(0, size)
+    // result._heads = LogUtils._findHeads(sorted)
+    // result._heads.forEach((f) => console.log(result.get(f)))
+    // console.log(result.items.length, size)
     return result
   }
 
@@ -268,12 +346,12 @@ class LogUtils {
    * @param {Array<Log>} logs
    * @returns {Log}
    */
-  static joinAll (ipfs, logs) {
+  static joinAll(ipfs, logs, length) {
     if (!ipfs) throw IpfsNotDefinedError
 
     return logs.reduce((log, val, i) => {
       if (!log) return val
-      return LogUtils.join(ipfs, log, val)
+      return LogUtils.join(ipfs, log, val, length)
     }, null)
   }
 
@@ -285,18 +363,35 @@ class LogUtils {
    * @param {function(hash, entry, parent, depth)} onProgressCallback
    * @returns {Promise<Log>}
    */
-  static expand (ipfs, log, length = -1, onProgressCallback) {
+  static expand(ipfs, log, length = -1, onProgressCallback) {
     if (!ipfs) throw IpfsNotDefinedError
     if (!log) throw LogNotDefinedError
+    // Find tails (entries that point to an entry that is not in the log)
+    const nexts = log.items.slice().reduce((res, e) => res.concat(e.next), [])
+    const tails = nexts.slice()
+      .filter((e) => nexts.includes(e))
+      .sort((a, b) => a.hash < b.hash)
 
-    // TODO: Find tails (entries that point to an entry that is not in the log)
-    const tails = log.items.slice()[0].next.sort(LogUtils._compare)
-    // Fetch a log starting from each tail entry
-    const getLog = tails.map((f) => LogUtils.fromEntry(ipfs, f, length, onProgressCallback))
+    // Fetch entries starting from all tail entries
+    const amount = length > -1 ? length - log.items.length : -1
+    return LogUtils.fetchAll(ipfs, tails, amount, log.items.map((e) => e.hash))
+      .then((entries) => {
+        // let result = LogUtils.create(entries)
+        // console.log(entries.length)
+        // result = LogUtils.join(ipfs, log, result, length)
+        // let result = LogUtils.create()
+        // entries.reverse().forEach((e) => LogUtils._insert(ipfs, result, e))
+        // result._heads = LogUtils._findHeads(result.items)
+        // return LogUtils.join(ipfs, log, result, length)
+        const sorted = LogUtils.sort(log.items.slice().reverse().concat(entries))
+        let result = LogUtils.create(sorted)
+        return result
+        // return LogUtils.join(ipfs, log, result, length)
+      })
     // Join all logs together to one log
-    const joinAll = (logs) => LogUtils.joinAll(ipfs, logs.concat([log]))
+    // const joinAll = (logs) => LogUtils.joinAll(ipfs, logs.concat([log]), length)
     // Create all logs and join them
-    return Promise.all(getLog).then(joinAll)
+    // return Promise.all(getLog).then(joinAll)
   }
 
   /**
@@ -305,7 +400,7 @@ class LogUtils {
    * @param {Entry} entry Entry to be inserted
    * @returns {Entry}
    */
-  static _insert (ipfs, log, entry) {
+  static _insert(ipfs, log, entry, debug) {
     if (!ipfs) throw IpfsNotDefinedError
     if (!log) throw LogNotDefinedError
 
@@ -313,11 +408,25 @@ class LogUtils {
     // If entry is already in the log, don't insert
     if (hashes.includes(entry.hash)) return entry
     // Find the item's parents' indices
-    const indices = entry.next.map((next) => hashes.indexOf(next))
+    const indices2 = log.items.map((f, idx) => {
+      // console.log(f.payload, f.next, entry.hash, f.next.includes(entry.hash))
+      return f.next.includes(entry.hash) ? idx - 1 : -1
+    })
+    // console.log("22", indices2)
+    const indices = entry.next.map((next) => hashes.indexOf(next)).concat(indices2)
     // Find the largest index (latest parent)
-    const index = indices.length > 0 ? Math.max(Math.max.apply(null, indices) + 1, 0) : 0
+    let index = indices.length > 0 
+      ? Math.max(Math.max.apply(null, indices) + 1, 0) 
+      // ? Math.max.apply(null, indices)
+      : 0
+
+    // if (Math.max.apply(null, indices) === Math.max.apply(null, indices2))
+    //   index--
+
     // Insert
     log.items.splice(index, 0, entry)
+    // if (debug)
+    //   console.log(index, Math.max.apply(null, indices), Math.max.apply(null, indices2), entry.payload, entry.hash, entry.next)
     return entry
   }
 
@@ -333,25 +442,87 @@ class LogUtils {
    * @param {function(hash, entry, parent, depth)} onProgressCallback
    * @returns {Promise<Array<Entry>>}
    */
-  static _fetchRecursive (ipfs, hash, all = {}, amount = -1, depth = 0, parent = null, onProgressCallback = () => {}) {
-    if (!ipfs) throw IpfsNotDefinedError
+  // static _fetchRecursive(ipfs, hash, all = {}, amount = -1, depth = 0, parent = null, onProgressCallback = () => {}) {
+  //   if (!ipfs) throw IpfsNotDefinedError
 
-    // If the given hash is already fetched
-    // or if we're at maximum depth, return
-    if (all[hash] || (depth >= amount && amount > 0)) {
-      return Promise.resolve([])
+  //   // If the given hash is already fetched
+  //   // or if we're at maximum depth, return
+  //   if (all[hash] || (depth >= amount && amount > 0)) {
+  //     return Promise.resolve([])
+  //   }
+  //   // Create the entry and add it to the result
+  //   // console.log("...", depth)
+  //   return Entry.fromMultihash(ipfs, hash)
+  //     .then((entry) => {
+  //       all[hash] = entry
+  //       onProgressCallback(hash, entry, parent, depth)
+  //       const fetch = (hash, idx) => LogUtils._fetchRecursive(ipfs, hash, all, amount - idx, depth + 1, entry, onProgressCallback)
+  //       return mapSeries(entry.next, fetch)
+  //         .then((res) => res.concat([entry]))
+  //         .then((res) => res.reduce((a, b) => a.concat(b), [])) // flatten the array
+  //     })
+  // }
+
+  static fetchAll(ipfs, hashes, amount, exclude = []) {
+    let result = []
+    let loadingQueue = Array.isArray(hashes) ? hashes.slice() : [hashes]
+
+    const shouldFetchMore = () => {
+      // console.log(result.length, loadingQueue.length)
+      return loadingQueue.length > 0
+        && (result.length < amount || amount === -1)
     }
-    // Create the entry and add it to the result
-    return Entry.fromMultihash(ipfs, hash)
-      .then((entry) => {
-        all[hash] = entry
-        onProgressCallback(hash, entry, parent, depth)
-        const fetch = (hash) => LogUtils._fetchRecursive(ipfs, hash, all, amount, depth + 1, entry, onProgressCallback)
-        return mapSeries(entry.next, fetch)
-          .then((res) => res.concat([entry]))
-          .then((res) => res.reduce((a, b) => a.concat(b), [])) // flatten the array
-      })
+
+    return new Promise((resolve, reject) => {
+      whilst(
+        shouldFetchMore,
+        (cb) => {
+          // console.log(loadingQueue)
+          const hash = loadingQueue.shift()
+          if (exclude.concat(result.map((e) => e.hash)).includes(hash)) {
+            cb(null, result)
+          } else {
+            // const hash = loadingQueue.shift()
+            Entry.fromMultihash(ipfs, hash)
+              .then((e) => {
+                // console.log("\nentry:\n", e)
+                // console.log("entry:", e.payload)
+                // console.log("\nnext\n", e.next)
+                // TODO: insert after parent?
+                const idx = loadingQueue.indexOf(hash) - 1
+                e.next.forEach((f, i) => loadingQueue.splice(idx + i, 0, f))
+                
+                // loadingQueue = loadingQueue.concat(e.next)
+                result.push(e)
+                // console.log("\nload next:\n", loadingQueue)
+                cb(null, result)
+                // return { items: result, queue: loadingQueue }
+              })
+          }
+        },
+        (err, res) => {
+          // console.log(res)
+          if (err) reject(err)
+          resolve(result)
+        }
+      )      
+    })
   }
+
+  // static processQueue(result, loadingQueue) {
+  //   if (loadingQueue > 0) {
+  //     console.log(loadingQueue)
+  //     const hash = loadingQueue.shift()
+  //     console.log(hash)
+  //     return Entry.fromMultihash(hash)
+  //       .then((e) => {
+  //         console.log(e)
+  //         loadingQueue.concat(e.next)
+  //         result.push(e)
+  //         return { items: result, queue: loadingQueue }
+  //       })
+  //   }
+  // }
 
   /**
    * Find heads of a log
@@ -359,7 +530,7 @@ class LogUtils {
    * @param {Log} log
    * @returns {Array<Entry>}
    */
-  static _findHeads (entries) {
+  static _findHeads(entries) {
     return entries.slice()
       .reverse()
       .filter((f) => !LogUtils._isReferencedInChain(entries, f))
@@ -374,7 +545,7 @@ class LogUtils {
    * @param {Entry} [entry] Entry to search for
    * @returns {boolean}
    */
-  static _isReferencedInChain (entries, entry) {
+  static _isReferencedInChain(entries, entry) {
     return entries.slice().reverse().find((e) => Entry.hasChild(e, entry)) !== undefined
   }
 
@@ -386,7 +557,7 @@ class LogUtils {
    * @param {Entry} [entry] Entry for which to find the parents
    * @returns {Array<Entry>}
    */
-  static _findParents (entries, entry) {
+  static _findParents(entries, entry) {
     let stack = []
     let parent = entries.find((e) => Entry.hasChild(e, entry))
     let prev = entry
@@ -403,7 +574,7 @@ class LogUtils {
    * @private
    * @returns {boolean}
    */
-  static _compare (a, b) {
+  static _compare(a, b) {
     return a < b
   }
 }

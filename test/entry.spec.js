@@ -12,8 +12,8 @@ const dataDir = './ipfs'
 
 let ipfs, ipfsDaemon
 
-// [IpfsNodeDaemon].forEach((IpfsDaemon) => {
-[IpfsNodeDaemon, IpfsNativeDaemon].forEach((IpfsDaemon) => {
+[IpfsNodeDaemon].forEach((IpfsDaemon) => {
+// [IpfsNodeDaemon, IpfsNativeDaemon].forEach((IpfsDaemon) => {
 
   describe('Entry', function() {
     this.timeout(60000)
